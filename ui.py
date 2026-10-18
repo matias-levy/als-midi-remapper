@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -73,6 +74,7 @@ HEADERS = [
 LEADING_INT = re.compile(r"\s*(-?\d+)")
 CHANGED_TINT = QColor(214, 140, 24, 110)
 UNDO_LIMIT = 100
+MAPPING_ROLE = Qt.ItemDataRole.UserRole
 
 
 def _mapping_state(mapping: Mapping) -> tuple:
@@ -84,6 +86,17 @@ def _mapping_state(mapping: Mapping) -> tuple:
         mapping.range_min,
         mapping.range_max,
     )
+
+
+def _range_sort_value(mapping: Mapping, which: str) -> tuple[int, float]:
+    raw = mapping.range_min if which == "min" else mapping.range_max
+    if raw is None or mapping.range_unit == "none":
+        return (1, 0.0)
+    if mapping.range_unit == "db":
+        amplitude = float(raw)
+        decibels = float("-inf") if amplitude <= 0 else 20 * math.log10(amplitude)
+        return (0, decibels)
+    return (0, float(raw))
 
 
 def _restore_mapping(mapping: Mapping, state: tuple) -> None:
@@ -275,6 +288,9 @@ class MainWindow(QMainWindow):
         self._directory = str(Path.home())
         self._undo: list[dict[int, tuple]] = []
         self._redo: list[dict[int, tuple]] = []
+        self._display_order: list[int] = []
+        self._sort_column: int | None = None
+        self._sort_ascending = True
 
         self.table = QTableWidget(0, len(HEADERS))
         self.table.setHorizontalHeaderLabels(HEADERS)
@@ -294,6 +310,9 @@ class MainWindow(QMainWindow):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(False)
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(False)
+        header.sectionClicked.connect(self._sort_by_column)
         for column, width in (
             (COL_TRACK, 140),
             (COL_DEVICE, 180),
@@ -392,6 +411,10 @@ class MainWindow(QMainWindow):
         self._undo.clear()
         self._redo.clear()
         self._update_history_actions()
+        self._display_order = []
+        self._sort_column = None
+        self._sort_ascending = True
+        self.table.horizontalHeader().setSortIndicatorShown(False)
         self._directory = str(path.parent)
         self._fill_table()
         self.save_action.setEnabled(True)
@@ -463,15 +486,18 @@ class MainWindow(QMainWindow):
 
     def _fill_table(self) -> None:
         mappings = self.live_set.mappings if self.live_set else []
+        if len(self._display_order) != len(mappings):
+            self._display_order = list(range(len(mappings)))
         self.table.blockSignals(True)
         self.table.setRowCount(0)
-        self.table.setRowCount(len(mappings))
-        for row, mapping in enumerate(mappings):
-            self._populate_row(row, mapping)
+        self.table.setRowCount(len(self._display_order))
+        for row, mapping_index in enumerate(self._display_order):
+            self._populate_row(row, mapping_index)
         self.table.blockSignals(False)
         self._apply_filter()
 
-    def _populate_row(self, row: int, mapping: Mapping) -> None:
+    def _populate_row(self, row: int, mapping_index: int) -> None:
+        mapping = self.live_set.mappings[mapping_index]  # type: ignore[union-attr]
         self._set_text(row, COL_TRACK, mapping.track, False)
         self._set_text(row, COL_DEVICE, mapping.device, False)
         self._set_text(row, COL_PARAM, mapping.parameter, False)
@@ -483,7 +509,26 @@ class MainWindow(QMainWindow):
         self._set_range_tip(row, mapping)
         self._set_choice(row, COL_TYPE, ((False, "CC"), (True, "Note")), mapping.is_note, self._type_changed)
         self._set_choice(row, COL_MODE, MAP_MODES, mapping.map_mode, self._mode_changed)
+        for column in range(self.table.columnCount()):
+            item = self.table.item(row, column)
+            if item is not None:
+                item.setData(MAPPING_ROLE, mapping_index)
         self._tint_row(row)
+
+    def _mapping_index(self, row: int) -> int:
+        item = self.table.item(row, COL_TRACK)
+        if item is None:
+            raise RuntimeError("A table row is missing its mapping.")
+        return int(item.data(MAPPING_ROLE))
+
+    def _mapping_for_row(self, row: int) -> Mapping:
+        return self.live_set.mappings[self._mapping_index(row)]  # type: ignore[union-attr]
+
+    def _visual_row(self, mapping_index: int) -> int:
+        for row in range(self.table.rowCount()):
+            if self._mapping_index(row) == mapping_index:
+                return row
+        raise RuntimeError("A mapping is missing from the table.")
 
     def _set_choice(self, row: int, column: int, options: tuple, current, on_change) -> None:  # noqa: ANN001
         if self.table.item(row, column) is None:
@@ -512,7 +557,7 @@ class MainWindow(QMainWindow):
             return
         self.table.blockSignals(True)
         try:
-            self._populate_row(row, self.live_set.mappings[row])
+            self._populate_row(row, self._mapping_index(row))
         finally:
             self.table.blockSignals(False)
         self._update_title()
@@ -533,13 +578,13 @@ class MainWindow(QMainWindow):
     def _tint_all(self) -> None:
         if self.live_set is None:
             return
-        for row in range(len(self.live_set.mappings)):
+        for row in range(self.table.rowCount()):
             self._tint_row(row)
 
     def _tint_row(self, row: int) -> None:
-        if self.live_set is None or row >= len(self.live_set.mappings):
+        if self.live_set is None or row >= self.table.rowCount():
             return
-        mapping = self.live_set.mappings[row]
+        mapping = self._mapping_for_row(row)
         self._mark_item(row, COL_CHANNEL, mapping.channel != mapping.orig_channel)
         self._mark_item(row, COL_NUMBER, mapping.number != mapping.orig_number)
         self._mark_item(row, COL_MIN, mapping.range_min != mapping.orig_range_min)
@@ -581,7 +626,7 @@ class MainWindow(QMainWindow):
             self._commit_range(row, column, item.text())
 
     def _commit_channel(self, row: int, text: str) -> None:
-        mapping = self.live_set.mappings[row]  # type: ignore[union-attr]
+        mapping = self._mapping_for_row(row)
         before = self._capture_state()
         match = LEADING_INT.match(text or "")
         value = int(match.group(1)) if match else None
@@ -593,7 +638,7 @@ class MainWindow(QMainWindow):
         self._sync_row(row)
 
     def _commit_number(self, row: int, text: str) -> None:
-        mapping = self.live_set.mappings[row]  # type: ignore[union-attr]
+        mapping = self._mapping_for_row(row)
         before = self._capture_state()
         match = LEADING_INT.match(text or "")
         value = int(match.group(1)) if match else None
@@ -605,7 +650,7 @@ class MainWindow(QMainWindow):
         self._sync_row(row)
 
     def _commit_range(self, row: int, column: int, text: str) -> None:
-        mapping = self.live_set.mappings[row]  # type: ignore[union-attr]
+        mapping = self._mapping_for_row(row)
         which = "min" if column == COL_MIN else "max"
         before = self._capture_state()
         try:
@@ -628,7 +673,7 @@ class MainWindow(QMainWindow):
         if not isinstance(combo, QComboBox):
             return
         before = self._capture_state()
-        self.live_set.mappings[row].is_note = bool(combo.currentData())
+        self._mapping_for_row(row).is_note = bool(combo.currentData())
         self._record_edit(before)
         self._sync_row(row)
 
@@ -642,7 +687,7 @@ class MainWindow(QMainWindow):
         if value is None:
             return
         before = self._capture_state()
-        self.live_set.mappings[row].map_mode = int(value)
+        self._mapping_for_row(row).map_mode = int(value)
         self._record_edit(before)
         self._tint_row(row)
         self._update_title()
@@ -651,7 +696,8 @@ class MainWindow(QMainWindow):
         if self.live_set is None:
             return
         query = self.filter.text().casefold().strip()
-        for row, mapping in enumerate(self.live_set.mappings):
+        for row in range(self.table.rowCount()):
+            mapping = self._mapping_for_row(row)
             haystack = " ".join(
                 [
                     mapping.track,
@@ -681,7 +727,7 @@ class MainWindow(QMainWindow):
             return 0
         before = self._capture_state()
         if spec["mode"] == "selected":
-            targets = [self.live_set.mappings[row] for row in self._selected_rows()]
+            targets = [self._mapping_for_row(row) for row in self._selected_rows()]
             if not targets:
                 self.statusBar().showMessage("Select one or more rows first.")
                 return 0
@@ -713,8 +759,8 @@ class MainWindow(QMainWindow):
                 mapping.number = spec["to_number"]
         self._record_edit(before)
         target_ids = {id(mapping) for mapping in targets}
-        for row, mapping in enumerate(self.live_set.mappings):
-            if id(mapping) in target_ids:
+        for row in range(self.table.rowCount()):
+            if id(self._mapping_for_row(row)) in target_ids:
                 self._sync_row(row)
         count = len(targets)
         noun = "mapping" if count == 1 else "mappings"
@@ -747,7 +793,7 @@ class MainWindow(QMainWindow):
             mapping = self.live_set.mappings[index]  # type: ignore[union-attr]
             inverse[index] = _mapping_state(mapping)
             _restore_mapping(mapping, state)
-            self._sync_row(index)
+            self._sync_row(self._visual_row(index))
         return inverse
 
     def undo(self) -> None:
@@ -763,6 +809,57 @@ class MainWindow(QMainWindow):
         self._undo.append(self._restore_entry(self._redo.pop()))
         self._update_history_actions()
         self.statusBar().showMessage("Redid the last change.")
+
+    def _sort_by_column(self, column: int) -> None:
+        if self.live_set is None or not self.live_set.mappings:
+            return
+        if self._sort_column == column:
+            self._sort_ascending = not self._sort_ascending
+        else:
+            self._sort_column = column
+            self._sort_ascending = True
+        selected = {self._mapping_index(row) for row in self._selected_rows()}
+        order = list(range(len(self.live_set.mappings)))
+        order.sort(key=lambda index: self._sort_value(index, column), reverse=not self._sort_ascending)
+        self._display_order = order
+        self._fill_table()
+        header = self.table.horizontalHeader()
+        header.setSortIndicator(
+            column,
+            Qt.SortOrder.AscendingOrder if self._sort_ascending else Qt.SortOrder.DescendingOrder,
+        )
+        header.setSortIndicatorShown(True)
+        self._restore_selection(selected)
+
+    def _sort_value(self, mapping_index: int, column: int):
+        mapping = self.live_set.mappings[mapping_index]  # type: ignore[union-attr]
+        if column == COL_TRACK:
+            return mapping.track.casefold()
+        if column == COL_DEVICE:
+            return mapping.device.casefold()
+        if column == COL_PARAM:
+            return mapping.parameter.casefold()
+        if column == COL_TYPE:
+            return "note" if mapping.is_note else "cc"
+        if column == COL_CHANNEL:
+            return mapping.channel
+        if column == COL_NUMBER:
+            return mapping.number
+        if column == COL_MIN:
+            return _range_sort_value(mapping, "min")
+        if column == COL_MAX:
+            return _range_sort_value(mapping, "max")
+        return map_mode_label(mapping.map_mode).casefold()
+
+    def _restore_selection(self, mapping_indexes: set[int]) -> None:
+        if not mapping_indexes:
+            return
+        flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+        model = self.table.model()
+        selection = self.table.selectionModel()
+        for row in range(self.table.rowCount()):
+            if self._mapping_index(row) in mapping_indexes:
+                selection.select(model.index(row, 0), flags)
 
     def _update_history_actions(self) -> None:
         self.undo_action.setEnabled(bool(self._undo))

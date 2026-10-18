@@ -336,6 +336,57 @@ class UiSmokeTests(unittest.TestCase):
             mapping.capture_original()
         window.close()
 
+    def test_column_sort_reorders_the_view_only(self) -> None:
+        from ui import COL_CHANNEL, COL_NUMBER, COL_PARAM, MainWindow
+
+        window = MainWindow()
+        window.load_path(ALS)
+        original = [mapping.parameter for mapping in window.live_set.mappings]
+        header = window.table.horizontalHeader()
+
+        header.sectionClicked.emit(COL_CHANNEL)
+        self.assertEqual(
+            [window.table.item(row, COL_PARAM).text() for row in range(window.table.rowCount())],
+            ["Pan", "Volume", "Gain", "Track Activator"],
+        )
+        self.assertEqual([mapping.parameter for mapping in window.live_set.mappings], original)
+        self.assertEqual(window.live_set.render(), window.live_set.xml)
+        self.assertFalse(window.live_set.is_dirty)
+
+        window.table.selectRow(0)
+        header.sectionClicked.emit(COL_CHANNEL)
+        self.assertEqual(
+            [window.table.item(row, COL_PARAM).text() for row in range(window.table.rowCount())],
+            ["Track Activator", "Pan", "Volume", "Gain"],
+        )
+        selected = window._selected_rows()
+        self.assertEqual(
+            [window.table.item(row, COL_PARAM).text() for row in selected],
+            ["Pan"],
+        )
+
+        header.sectionClicked.emit(COL_NUMBER)
+        self.assertEqual(
+            [window.table.item(row, COL_PARAM).text() for row in range(window.table.rowCount())],
+            ["Track Activator", "Volume", "Pan", "Gain"],
+        )
+        volume_row = next(
+            row
+            for row in range(window.table.rowCount())
+            if window.table.item(row, COL_PARAM).text() == "Volume"
+        )
+        window.table.item(volume_row, COL_CHANNEL).setText("9")
+        self.assertEqual(window.live_set.mappings[2].parameter, "Volume")
+        self.assertEqual(window.live_set.mappings[2].channel, 9)
+        self.assertEqual(window.live_set.mappings[1].channel, 1)
+        window.undo()
+        self.assertEqual(window.live_set.mappings[2].channel, 1)
+        self.assertEqual(window.table.item(volume_row, COL_CHANNEL).text(), "1")
+        self.assertEqual(window.live_set.render(), window.live_set.xml)
+        for mapping in window.live_set.mappings:
+            mapping.capture_original()
+        window.close()
+
     def test_wheel_over_a_closed_dropdown_does_not_change_it(self) -> None:
         from PySide6.QtCore import QPoint, QPointF, Qt
         from PySide6.QtGui import QWheelEvent
