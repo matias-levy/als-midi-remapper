@@ -495,6 +495,7 @@ class MainWindow(QMainWindow):
             self._populate_row(row, mapping_index)
         self.table.blockSignals(False)
         self._apply_filter()
+        self.table.updateGeometries()
 
     def _populate_row(self, row: int, mapping_index: int) -> None:
         mapping = self.live_set.mappings[mapping_index]  # type: ignore[union-attr]
@@ -540,7 +541,9 @@ class MainWindow(QMainWindow):
             combo = MappingComboBox()
             for value, label in options:
                 combo.addItem(label, value)
-            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            # Fit-to-contents calls adjustSize() and pulls the closed combo back to its label.
+            combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            combo.setMinimumWidth(0)
             combo.currentIndexChanged.connect(lambda _index, row=row, column=column: on_change(row))
             self.table.setCellWidget(row, column, combo)
         index = next((i for i in range(combo.count()) if combo.itemData(i) == current), -1)

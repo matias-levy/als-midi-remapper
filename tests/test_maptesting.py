@@ -387,6 +387,34 @@ class UiSmokeTests(unittest.TestCase):
             mapping.capture_original()
         window.close()
 
+    def test_dropdowns_fill_their_cells_after_load_and_sort(self) -> None:
+        from PySide6.QtTest import QTest
+
+        from ui import COL_CHANNEL, COL_MODE, COL_TYPE, MainWindow
+
+        window = MainWindow()
+        window.show()
+        window.load_path(ALS)
+        QTest.qWait(50)
+        self._assert_choices_fill_cells(window)
+
+        window.table.horizontalHeader().sectionClicked.emit(COL_CHANNEL)
+        QTest.qWait(50)
+        self._assert_choices_fill_cells(window)
+        window.close()
+
+    def _assert_choices_fill_cells(self, window) -> None:
+        from ui import COL_MODE, COL_TYPE
+
+        model = window.table.model()
+        for row in range(window.table.rowCount()):
+            for column in (COL_TYPE, COL_MODE):
+                rect = window.table.visualRect(model.index(row, column))
+                combo = window.table.cellWidget(row, column)
+                self.assertFalse(rect.isEmpty(), column)
+                self.assertEqual(combo.geometry().width(), rect.width(), column)
+                self.assertEqual(combo.geometry().x(), rect.x(), column)
+
     def test_wheel_over_a_closed_dropdown_does_not_change_it(self) -> None:
         from PySide6.QtCore import QPoint, QPointF, Qt
         from PySide6.QtGui import QWheelEvent
