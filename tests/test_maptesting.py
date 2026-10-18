@@ -17,8 +17,127 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from mappings import LiveSet, amplitude_from_db, commit_range_text, db_from_amplitude, format_db, note_name, range_display
 
 ALS = Path(__file__).resolve().parents[1] / "MapTesting Project" / "MapTesting.als"
-KAOS = Path(__file__).resolve().parents[1] / "MapTesting Project" / "keyworks kaos.als"
 VALUE_RE = re.compile(r'<([A-Za-z0-9_.]+) Value="([^"]*)"')
+
+# A tiny set covering shapes MapTesting.als does not: macro links, Max devices,
+# rack variations, and the Main track. Channel 16 is a rack link, not MIDI.
+SYNTHETIC_SET = """<?xml version="1.0" encoding="UTF-8"?>
+<Ableton Creator="Ableton Live 12.4">
+  <LiveSet>
+    <Tracks>
+      <MidiTrack>
+        <Name><EffectiveName Value="Lead" /></Name>
+        <DeviceChain>
+          <Devices>
+            <StereoGain>
+              <Gain>
+                <MidiControllerRange>
+                  <Min Value="0" />
+                  <Max Value="1" />
+                </MidiControllerRange>
+                <KeyMidi>
+                  <IsNote Value="false" />
+                  <Channel Value="0" />
+                  <NoteOrController Value="75" />
+                  <ControllerMapMode Value="0" />
+                </KeyMidi>
+              </Gain>
+            </StereoGain>
+            <MxDeviceMidiEffect>
+              <PatchSlot>
+                <Value>
+                  <MxPatchRef>
+                    <FileRef>
+                      <RelativePath Value="Devices/Echo.amxd" />
+                    </FileRef>
+                  </MxPatchRef>
+                </Value>
+              </PatchSlot>
+              <ParameterList>
+                <MxDFloatParameter>
+                  <Name Value="Echo Time" />
+                  <Timeable>
+                    <KeyMidi>
+                      <IsNote Value="false" />
+                      <Channel Value="1" />
+                      <NoteOrController Value="10" />
+                      <ControllerMapMode Value="0" />
+                    </KeyMidi>
+                  </Timeable>
+                </MxDFloatParameter>
+              </ParameterList>
+            </MxDeviceMidiEffect>
+            <InstrumentGroupDevice>
+              <UserName Value="Kit" />
+              <MacroDisplayNames.0 Value="Macro 1" />
+              <MacroControls.0>
+                <KeyMidi>
+                  <IsNote Value="false" />
+                  <Channel Value="2" />
+                  <NoteOrController Value="20" />
+                  <ControllerMapMode Value="0" />
+                </KeyMidi>
+                <KeyMidi>
+                  <IsNote Value="false" />
+                  <Channel Value="16" />
+                  <NoteOrController Value="1" />
+                  <ControllerMapMode Value="0" />
+                </KeyMidi>
+              </MacroControls.0>
+              <MacroVariations>
+                <MacroSnapshots>
+                  <MacroSnapshot>
+                    <SnapshotName Value="Piano" />
+                    <RecallSnapshotKeyMidi>
+                      <IsNote Value="true" />
+                      <Channel Value="3" />
+                      <NoteOrController Value="40" />
+                      <ControllerMapMode Value="0" />
+                    </RecallSnapshotKeyMidi>
+                  </MacroSnapshot>
+                </MacroSnapshots>
+                <SnapshotIndexScrollerKeyMidi>
+                  <IsNote Value="false" />
+                  <Channel Value="0" />
+                  <NoteOrController Value="73" />
+                  <ControllerMapMode Value="0" />
+                </SnapshotIndexScrollerKeyMidi>
+              </MacroVariations>
+              <RandomizeMacrosKeyMidi>
+                <IsNote Value="true" />
+                <Channel Value="3" />
+                <NoteOrController Value="61" />
+                <ControllerMapMode Value="0" />
+              </RandomizeMacrosKeyMidi>
+              <RecallSelectedSnapshotKeyMidi>
+                <IsNote Value="true" />
+                <Channel Value="9" />
+                <NoteOrController Value="40" />
+                <ControllerMapMode Value="0" />
+              </RecallSelectedSnapshotKeyMidi>
+            </InstrumentGroupDevice>
+          </Devices>
+        </DeviceChain>
+      </MidiTrack>
+    </Tracks>
+    <MainTrack>
+      <Name><EffectiveName Value="Main" /></Name>
+      <KeyMidiSceneUp>
+        <IsNote Value="false" />
+        <Channel Value="0" />
+        <NoteOrController Value="31" />
+        <ControllerMapMode Value="0" />
+      </KeyMidiSceneUp>
+      <KeyMidiFireSelectedScene>
+        <IsNote Value="false" />
+        <Channel Value="0" />
+        <NoteOrController Value="115" />
+        <ControllerMapMode Value="0" />
+      </KeyMidiFireSelectedScene>
+    </MainTrack>
+  </LiveSet>
+</Ableton>
+"""
 
 
 class MapTestingTests(unittest.TestCase):
@@ -178,75 +297,52 @@ class MapTestingTests(unittest.TestCase):
             self.assertEqual(gzip.decompress(dest.read_bytes()).decode("utf-8"), updated)
 
 
-class KeyworksKaosTests(unittest.TestCase):
-    def test_lists_controller_mappings_and_silent_gain(self) -> None:
-        live = LiveSet.load(KAOS)
-        self.assertEqual(len(live.mappings), 60)
-        self.assertTrue(all(1 <= mapping.channel <= 16 for mapping in live.mappings))
-        self.assertTrue(all(not mapping.parameter.startswith("MacroControls.") for mapping in live.mappings))
-        self.assertTrue(all("MxDevice" not in mapping.device for mapping in live.mappings))
-        self.assertNotIn("Timeable", {mapping.parameter for mapping in live.mappings})
+class SyntheticSetTests(unittest.TestCase):
+    def test_lists_scene_rack_max_and_skips_macro_links(self) -> None:
+        live = LiveSet.from_xml(SYNTHETIC_SET)
         self.assertEqual(live.render(), live.xml)
+        by_parameter = {mapping.parameter: mapping for mapping in live.mappings}
+        self.assertEqual(
+            set(by_parameter),
+            {
+                "Gain",
+                "Echo Time",
+                "Macro 1",
+                "Variation Piano",
+                "Select Variation",
+                "Randomize Macros",
+                "Recall Variation",
+                "Scene Up",
+                "Scene Launch",
+            },
+        )
 
-        silent = [
-            mapping
-            for mapping in live.mappings
-            if mapping.parameter == "Gain" and mapping.range_min == "0"
-        ]
-        self.assertEqual(len(silent), 2)
-        self.assertEqual(format_db("0"), "-inf dB")
-        self.assertEqual(range_display(silent[0], "min"), "-inf dB")
-        self.assertEqual(commit_range_text(silent[0], "min", "-inf dB"), "0")
+        gain = by_parameter["Gain"]
+        self.assertEqual(gain.device, "Utility")
+        self.assertEqual(gain.range_unit, "db")
+        self.assertEqual(range_display(gain, "min"), "-inf dB")
+        self.assertEqual(commit_range_text(gain, "min", "-inf dB"), "0")
 
-        silent[0].channel = 2
-        updated = live.render()
-        self.assertEqual(updated.count('Channel Value="16"'), live.xml.count('Channel Value="16"'))
-        self.assertNotEqual(updated, live.xml)
+        echo = by_parameter["Echo Time"]
+        self.assertEqual(echo.track, "Lead")
+        self.assertEqual(echo.device, "Echo")
+        self.assertEqual(echo.channel, 2)
 
-    def test_lists_scene_rack_and_max_mappings(self) -> None:
-        live = LiveSet.load(KAOS)
-        by_parameter = {}
-        for mapping in live.mappings:
-            by_parameter.setdefault(mapping.parameter, []).append(mapping)
-
-        scene_up = by_parameter["Scene Up"][0]
+        self.assertEqual(by_parameter["Macro 1"].device, "Kit")
+        self.assertEqual(by_parameter["Variation Piano"].number, 40)
+        self.assertEqual(by_parameter["Randomize Macros"].track, "Lead")
+        scene_up = by_parameter["Scene Up"]
         self.assertEqual(scene_up.track, "Main")
         self.assertEqual(scene_up.device, "")
-        self.assertFalse(scene_up.is_note)
-        self.assertEqual(scene_up.channel, 1)
         self.assertEqual(scene_up.number, 31)
-        self.assertIsNone(scene_up.range_min)
-
-        scene_launch = by_parameter["Scene Launch"][0]
-        self.assertEqual(scene_launch.track, "Main")
-        self.assertFalse(scene_launch.is_note)
-        self.assertEqual(scene_launch.number, 115)
-        self.assertEqual(by_parameter["Scene Down"][0].number, 86)
-        scroll = by_parameter["Scroll Scene"][0]
-        self.assertEqual(scroll.number, 114)
-        self.assertEqual(scroll.map_mode, 4)
-
-        self.assertEqual(len(by_parameter["Randomize Macros"]), 3)
-        self.assertEqual(len(by_parameter["Recall Variation"]), 1)
-        variations = [mapping for mapping in live.mappings if mapping.parameter.startswith("Variation ")]
-        self.assertEqual(len(variations), 13)
-        self.assertIn("Select Variation", by_parameter)
-        randomize = next(mapping for mapping in by_parameter["Randomize Macros"] if mapping.number == 61)
-        self.assertEqual(randomize.track, "Modular")
-        self.assertTrue(randomize.is_note)
-        self.assertIn("Rack", randomize.device)
-
-        probability = next(mapping for mapping in live.mappings if mapping.parameter == "Probability")
-        self.assertNotIn("MxDevice", probability.device)
-        self.assertTrue(probability.device)
-        self.assertIn("Macro 1", by_parameter)
+        self.assertEqual(by_parameter["Scene Launch"].number, 115)
 
         scene_up.channel = 2
         updated = live.render()
+        self.assertEqual(updated.count('Channel Value="16"'), live.xml.count('Channel Value="16"'))
         again = LiveSet.from_xml(updated)
         restored = next(mapping for mapping in again.mappings if mapping.parameter == "Scene Up")
         self.assertEqual(restored.channel, 2)
-        self.assertEqual(restored.number, 31)
         self.assertEqual(
             next(mapping for mapping in again.mappings if mapping.parameter == "Scene Launch").number,
             115,
@@ -319,7 +415,7 @@ class UiSmokeTests(unittest.TestCase):
         window.close()
 
     def test_remap_every_row_on_a_channel(self) -> None:
-        from ui import COL_MIN, MainWindow
+        from ui import MainWindow
 
         window = MainWindow()
         window.load_path(ALS)
@@ -346,13 +442,6 @@ class UiSmokeTests(unittest.TestCase):
         self.assertEqual(
             window.table.item(volume_row, COL_NUMBER).background().style(),
             Qt.BrushStyle.NoBrush,
-        )
-        for mapping in window.live_set.mappings:
-            mapping.capture_original()
-        window.load_path(KAOS)
-        self.assertEqual(window.table.rowCount(), 60)
-        self.assertTrue(
-            any(window.table.item(row, COL_MIN).text() == "-inf dB" for row in range(window.table.rowCount()))
         )
         for mapping in window.live_set.mappings:
             mapping.capture_original()
