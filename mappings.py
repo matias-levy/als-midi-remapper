@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from alsio import (
+    MAP_TAGS,
     AlsError,
-    keymidi_spans,
     load_als,
+    mapping_spans,
     replace_attr,
     save_als,
     sibling_range_span,
@@ -22,10 +23,28 @@ TRACK_TAGS = {
     "GroupTrack",
     "ReturnTrack",
     "MasterTrack",
+    "MainTrack",
     "PreHearTrack",
 }
-DEVICE_ALIASES = {"StereoGain": "Utility"}
+DEVICE_ALIASES = {
+    "StereoGain": "Utility",
+    "InstrumentGroupDevice": "Instrument Rack",
+    "AudioEffectGroupDevice": "Audio Effect Rack",
+    "MidiEffectGroupDevice": "MIDI Effect Rack",
+    "MxDeviceMidiEffect": "Max MIDI Effect",
+    "MxDeviceAudioEffect": "Max Audio Effect",
+    "MxDeviceInstrument": "Max Instrument",
+}
 PARAMETER_ALIASES = {"Speaker": "Track Activator"}
+CONTROL_LABELS = {
+    "KeyMidiSceneUp": "Scene Up",
+    "KeyMidiSceneDown": "Scene Down",
+    "KeyMidiFireSelectedScene": "Scene Launch",
+    "KeyMidiScrollSelectedScene": "Scroll Scene",
+    "RandomizeMacrosKeyMidi": "Randomize Macros",
+    "RecallSelectedSnapshotKeyMidi": "Recall Variation",
+    "SnapshotIndexScrollerKeyMidi": "Select Variation",
+}
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
 
@@ -88,9 +107,9 @@ class LiveSet:
         except ET.ParseError as exc:
             raise AlsError(f"This file is not Ableton XML ({exc}).") from exc
         mappings = extract_mappings(root)
-        spans = keymidi_spans(xml_text)
-        keymidi_count = sum(1 for element in root.iter() if local_name(element.tag) == "KeyMidi")
-        if len(spans) != keymidi_count:
+        spans = mapping_spans(xml_text)
+        map_count = sum(1 for element in root.iter() if local_name(element.tag) in MAP_TAGS)
+        if len(spans) != map_count:
             raise AlsError("Could not line up MIDI mappings in this Live set.")
         return cls(xml=xml_text, creator=root.attrib.get("Creator", ""), mappings=mappings)
 
@@ -99,7 +118,7 @@ class LiveSet:
         return any(mapping.is_dirty for mapping in self.mappings)
 
     def render(self) -> str:
-        spans = keymidi_spans(self.xml)
+        spans = mapping_spans(self.xml)
         if any(mapping.index < 0 or mapping.index >= len(spans) for mapping in self.mappings):
             raise AlsError("The Live set changed shape and can no longer be saved safely.")
         replacements: list[tuple[int, int, str]] = []
@@ -152,29 +171,22 @@ def extract_mappings(root: ET.Element) -> list[Mapping]:
     mappings: list[Mapping] = []
     ordinal = 0
     for element in root.iter():
-        if local_name(element.tag) != "KeyMidi":
+        map_tag = local_name(element.tag)
+        if map_tag not in MAP_TAGS:
             continue
         index = ordinal
         ordinal += 1
-        parameter_element = parent.get(element)
-        if parameter_element is None:
+        host = parent.get(element)
+        if host is None:
             continue
-        parameter_tag = local_name(parameter_element.tag)
-        device_labels: list[str] = []
-        device_tags: list[str] = []
-        track = ""
-        current: ET.Element | None = parameter_element
-        while current is not None:
-            ancestor = parent.get(current)
-            if ancestor is not None and local_name(ancestor.tag) == "Devices":
-                device_labels.append(device_label(current))
-                device_tags.append(local_name(current.tag))
-            if not track and local_name(current.tag) in TRACK_TAGS:
-                track = effective_name(current) or local_name(current.tag)
-            current = ancestor
-        device_labels.reverse()
-        device_tags.reverse()
-        range_min, range_max = controller_range(parameter_element)
+        if map_tag == "KeyMidi":
+            parameter = parameter_label(host, local_name(host.tag), parent)
+            context_start: ET.Element | None = host
+        else:
+            parameter = control_label(map_tag, host)
+            context_start = element
+        device_labels, device_tags, track = mapping_context(context_start, parent)
+        range_min, range_max = controller_range(host)
         is_note = child_value(element, "IsNote") == "true"
         try:
             stored_channel = int(required_value(element, "Channel"))
@@ -187,13 +199,13 @@ def extract_mappings(root: ET.Element) -> list[Mapping]:
         if not 0 <= stored_channel <= 15:
             continue
         channel = stored_channel + 1
-        unit = range_unit(parameter_tag, device_tags, range_min is not None)
+        unit = range_unit(local_name(host.tag) if map_tag == "KeyMidi" else "", device_tags, range_min is not None)
         mappings.append(
             Mapping(
                 index=index,
                 track=track,
                 device=" / ".join(device_labels),
-                parameter=PARAMETER_ALIASES.get(parameter_tag, parameter_tag),
+                parameter=parameter,
                 is_note=is_note,
                 channel=channel,
                 number=number,
@@ -338,12 +350,79 @@ def effective_name(element: ET.Element) -> str:
     return ""
 
 
+def mapping_context(
+    start: ET.Element, parent: dict[ET.Element, ET.Element]
+) -> tuple[list[str], list[str], str]:
+    device_labels: list[str] = []
+    device_tags: list[str] = []
+    track = ""
+    current: ET.Element | None = start
+    while current is not None:
+        ancestor = parent.get(current)
+        if ancestor is not None and local_name(ancestor.tag) == "Devices":
+            device_labels.append(device_label(current))
+            device_tags.append(local_name(current.tag))
+        if not track and local_name(current.tag) in TRACK_TAGS:
+            track = effective_name(current) or local_name(current.tag)
+        current = ancestor
+    device_labels.reverse()
+    device_tags.reverse()
+    return device_labels, device_tags, track
+
+
+def parameter_label(host: ET.Element, parameter_tag: str, parent: dict[ET.Element, ET.Element]) -> str:
+    owner = parent.get(host)
+    if parameter_tag == "Timeable" and owner is not None and local_name(owner.tag).startswith("MxD"):
+        name = child_value(owner, "Name").strip() or child_value(owner, "ShortName").strip()
+        if name:
+            return name
+    if parameter_tag == "ParameterValue" and owner is not None:
+        name = child_value(owner, "ParameterName").strip()
+        if name:
+            return name
+    if parameter_tag.startswith("MacroControls.") and owner is not None:
+        slot = parameter_tag.split(".", 1)[1]
+        name = child_value(owner, f"MacroDisplayNames.{slot}").strip()
+        if name:
+            return name
+    return PARAMETER_ALIASES.get(parameter_tag, parameter_tag)
+
+
+def control_label(map_tag: str, host: ET.Element) -> str:
+    if map_tag == "RecallSnapshotKeyMidi":
+        name = child_value(host, "SnapshotName").strip()
+        if not name:
+            return "Variation"
+        if name.casefold().startswith("variation"):
+            return name
+        return f"Variation {name}"
+    return CONTROL_LABELS.get(map_tag, map_tag)
+
+
 def device_label(element: ET.Element) -> str:
     user_name = child_value(element, "UserName").strip()
     if user_name:
         return user_name
     tag = local_name(element.tag)
+    if tag.startswith("MxDevice"):
+        patch = max_patch_name(element)
+        if patch:
+            return patch
     return DEVICE_ALIASES.get(tag, tag)
+
+
+def max_patch_name(element: ET.Element) -> str:
+    """File name of a Max for Live device, without the .amxd suffix."""
+    for child in list(element):
+        if local_name(child.tag) != "PatchSlot":
+            continue
+        for node in child.iter():
+            if local_name(node.tag) not in {"RelativePath", "Path"}:
+                continue
+            value = node.attrib.get("Value", "")
+            if value.lower().endswith(".amxd"):
+                return Path(value).stem
+    return ""
 
 
 def controller_range(element: ET.Element) -> tuple[str | None, str | None]:

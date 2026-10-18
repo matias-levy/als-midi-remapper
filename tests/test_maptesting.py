@@ -181,8 +181,11 @@ class MapTestingTests(unittest.TestCase):
 class KeyworksKaosTests(unittest.TestCase):
     def test_lists_controller_mappings_and_silent_gain(self) -> None:
         live = LiveSet.load(KAOS)
-        self.assertEqual(len(live.mappings), 38)
+        self.assertEqual(len(live.mappings), 60)
         self.assertTrue(all(1 <= mapping.channel <= 16 for mapping in live.mappings))
+        self.assertTrue(all(not mapping.parameter.startswith("MacroControls.") for mapping in live.mappings))
+        self.assertTrue(all("MxDevice" not in mapping.device for mapping in live.mappings))
+        self.assertNotIn("Timeable", {mapping.parameter for mapping in live.mappings})
         self.assertEqual(live.render(), live.xml)
 
         silent = [
@@ -199,6 +202,55 @@ class KeyworksKaosTests(unittest.TestCase):
         updated = live.render()
         self.assertEqual(updated.count('Channel Value="16"'), live.xml.count('Channel Value="16"'))
         self.assertNotEqual(updated, live.xml)
+
+    def test_lists_scene_rack_and_max_mappings(self) -> None:
+        live = LiveSet.load(KAOS)
+        by_parameter = {}
+        for mapping in live.mappings:
+            by_parameter.setdefault(mapping.parameter, []).append(mapping)
+
+        scene_up = by_parameter["Scene Up"][0]
+        self.assertEqual(scene_up.track, "Main")
+        self.assertEqual(scene_up.device, "")
+        self.assertFalse(scene_up.is_note)
+        self.assertEqual(scene_up.channel, 1)
+        self.assertEqual(scene_up.number, 31)
+        self.assertIsNone(scene_up.range_min)
+
+        scene_launch = by_parameter["Scene Launch"][0]
+        self.assertEqual(scene_launch.track, "Main")
+        self.assertFalse(scene_launch.is_note)
+        self.assertEqual(scene_launch.number, 115)
+        self.assertEqual(by_parameter["Scene Down"][0].number, 86)
+        scroll = by_parameter["Scroll Scene"][0]
+        self.assertEqual(scroll.number, 114)
+        self.assertEqual(scroll.map_mode, 4)
+
+        self.assertEqual(len(by_parameter["Randomize Macros"]), 3)
+        self.assertEqual(len(by_parameter["Recall Variation"]), 1)
+        variations = [mapping for mapping in live.mappings if mapping.parameter.startswith("Variation ")]
+        self.assertEqual(len(variations), 13)
+        self.assertIn("Select Variation", by_parameter)
+        randomize = next(mapping for mapping in by_parameter["Randomize Macros"] if mapping.number == 61)
+        self.assertEqual(randomize.track, "Modular")
+        self.assertTrue(randomize.is_note)
+        self.assertIn("Rack", randomize.device)
+
+        probability = next(mapping for mapping in live.mappings if mapping.parameter == "Probability")
+        self.assertNotIn("MxDevice", probability.device)
+        self.assertTrue(probability.device)
+        self.assertIn("Macro 1", by_parameter)
+
+        scene_up.channel = 2
+        updated = live.render()
+        again = LiveSet.from_xml(updated)
+        restored = next(mapping for mapping in again.mappings if mapping.parameter == "Scene Up")
+        self.assertEqual(restored.channel, 2)
+        self.assertEqual(restored.number, 31)
+        self.assertEqual(
+            next(mapping for mapping in again.mappings if mapping.parameter == "Scene Launch").number,
+            115,
+        )
 
 
 class UiSmokeTests(unittest.TestCase):
@@ -298,7 +350,7 @@ class UiSmokeTests(unittest.TestCase):
         for mapping in window.live_set.mappings:
             mapping.capture_original()
         window.load_path(KAOS)
-        self.assertEqual(window.table.rowCount(), 38)
+        self.assertEqual(window.table.rowCount(), 60)
         self.assertTrue(
             any(window.table.item(row, COL_MIN).text() == "-inf dB" for row in range(window.table.rowCount()))
         )

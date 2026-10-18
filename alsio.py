@@ -7,7 +7,23 @@ import io
 import re
 from pathlib import Path
 
-KEYMIDI_RE = re.compile(r"<KeyMidi\b[^>]*>.*?</KeyMidi>", re.DOTALL)
+# Live stores controller mappings in <KeyMidi> and in a few sibling tags with the
+# same inner fields (scene launch, rack variations, and so on).
+MAP_TAGS = frozenset(
+    {
+        "KeyMidi",
+        "KeyMidiFireSelectedScene",
+        "KeyMidiSceneDown",
+        "KeyMidiSceneUp",
+        "KeyMidiScrollSelectedScene",
+        "RandomizeMacrosKeyMidi",
+        "RecallSelectedSnapshotKeyMidi",
+        "RecallSnapshotKeyMidi",
+        "SnapshotIndexScrollerKeyMidi",
+    }
+)
+_MAP_TAG_CHOICES = "|".join(sorted(MAP_TAGS, key=len, reverse=True))
+MAP_BLOCK_RE = re.compile(rf"<({_MAP_TAG_CHOICES})\b[^>]*>.*?</\1>", re.DOTALL)
 TAG_RE = re.compile(r"<(/?)([A-Za-z0-9_.]+)([^>]*)>")
 
 
@@ -48,8 +64,9 @@ def default_save_path(source: Path) -> Path:
     return source.with_name(f"{source.stem} remapped{source.suffix or '.als'}")
 
 
-def keymidi_spans(xml_text: str) -> list[tuple[int, int]]:
-    return [(match.start(), match.end()) for match in KEYMIDI_RE.finditer(xml_text)]
+def mapping_spans(xml_text: str) -> list[tuple[int, int]]:
+    """Spans of every MIDI-map element, in document order."""
+    return [(match.start(), match.end()) for match in MAP_BLOCK_RE.finditer(xml_text)]
 
 
 def replace_attr(block: str, tag: str, value: str) -> str:
